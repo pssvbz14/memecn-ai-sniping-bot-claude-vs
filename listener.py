@@ -134,7 +134,7 @@ class PumpFunListener:
         Αν η δομή δεν αναγνωριστεί, επιστρέφει (None, None) - το detection
         πάντως ΚΑΤΑΓΡΑΦΕΤΑΙ στη βάση με τα raw logs, δεν χάνεται.
         """
-        for attempt in range(4):
+        for attempt in range(2):
             try:
                 resp = requests.post(
                     self.config.SOLANA_HTTP_URL,
