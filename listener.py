@@ -26,6 +26,7 @@ import websockets
 
 from config import Config
 from storage import Storage
+import risk_filters
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +123,23 @@ class PumpFunListener:
                 f"slot={slot} sig={signature[:12]}... "
                 f"(tx fetch: {fetch_latency_ms:.0f}ms)"
             )
+            # --- Βήμα observe-only: τρέχουμε το risk check αλλά ΔΕΝ φιλτράρουμε
+            # τίποτα ακόμα - μόνο καταγράφουμε για να δούμε αν βγαίνουν λογικά
+            # νούμερα σε πραγματικά δεδομένα πριν αποφασίσουμε thresholds.
+            if mint_address:
+                asyncio.create_task(self._log_risk_check(mint_address, creator_address))
+
+    async def _log_risk_check(self, mint_address: str, creator_address: str | None):
+        t0 = time.monotonic()
+        result = await asyncio.to_thread(
+            risk_filters.evaluate_token_risk, self.config, mint_address, creator_address
+        )
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        log.info(
+            f"[RISK CHECK] mint={mint_address} passed={result['passed']} "
+            f"signals={result['signals']} reasons={result['reasons']} "
+            f"({elapsed_ms:.0f}ms)"
+        )
 
     def _extract_accounts(self, signature: str) -> tuple[str | None, str | None]:
         """
