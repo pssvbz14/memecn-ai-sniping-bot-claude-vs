@@ -101,7 +101,10 @@ class PumpFunListener:
             return
 
         t0 = time.monotonic()
-        mint_address, creator_address = self._extract_accounts(signature)
+        # Τρέχει σε thread ώστε το retry/sleep να ΜΗΝ μπλοκάρει το event loop
+        mint_address, creator_address = await asyncio.to_thread(
+            self._extract_accounts, signature
+        )
         fetch_latency_ms = (time.monotonic() - t0) * 1000
 
         is_new = self.storage.log_detection(
@@ -123,42 +126,56 @@ class PumpFunListener:
     def _extract_accounts(self, signature: str) -> tuple[str | None, str | None]:
         """
         Best-effort: τραβάει την πλήρη συναλλαγή και επιστρέφει (mint, creator).
+        Retry με μικρό backoff: το log φτάνει σε commitment 'processed' (πολύ
+        γρήγορο), αλλά η συναλλαγή μπορεί να μην είναι ακόμα διαθέσιμη μέσω
+        getTransaction τη στιγμή που ρωτάμε. Ζητάμε explicit commitment
+        'confirmed' (όχι το default 'finalized', που θα ήταν πιο αργό) και
+        ξαναδοκιμάζουμε λίγες φορές αν έρθει άδειο αποτέλεσμα.
         Αν η δομή δεν αναγνωριστεί, επιστρέφει (None, None) - το detection
         πάντως ΚΑΤΑΓΡΑΦΕΤΑΙ στη βάση με τα raw logs, δεν χάνεται.
         """
-        try:
-            resp = requests.post(
-                self.config.SOLANA_HTTP_URL,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getTransaction",
-                    "params": [
-                        signature,
-                        {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
-                    ],
-                },
-                timeout=5,
-            )
-            resp.raise_for_status()
-            tx = resp.json().get("result")
-            if not tx:
-                return None, None
+        for attempt in range(4):
+            try:
+                resp = requests.post(
+                    self.config.SOLANA_HTTP_URL,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTransaction",
+                        "params": [
+                            signature,
+                            {
+                                "encoding": "jsonParsed",
+                                "commitment": "confirmed",
+                                "maxSupportedTransactionVersion": 0,
+                            },
+                        ],
+                    },
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                tx = resp.json().get("result")
 
-            account_keys = tx["transaction"]["message"]["accountKeys"]
-            # Ο πρώτος signer είναι σχεδόν πάντα ο creator/fee payer.
-            creator = next(
-                (a["pubkey"] for a in account_keys if a.get("signer")), None
-            )
-            # TODO: επιβεβαίωσε το index του mint account κόντρα στο ενεργό
-            # pump.fun IDL (create instruction). Placeholder: 2ο account μη-signer.
-            non_signers = [a["pubkey"] for a in account_keys if not a.get("signer")]
-            mint = non_signers[0] if non_signers else None
+                if not tx:
+                    # Η συναλλαγή δεν έχει φτάσει ακόμα σε confirmed - περίμενε λίγο
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
 
-            return mint, creator
-        except Exception:
-            log.debug(f"Δεν μπόρεσα να διαβάσω tx {signature}", exc_info=True)
-            return None, None
+                account_keys = tx["transaction"]["message"]["accountKeys"]
+                creator = next(
+                    (a["pubkey"] for a in account_keys if a.get("signer")), None
+                )
+                # TODO: επιβεβαίωσε το index του mint account κόντρα στο ενεργό
+                # pump.fun IDL (create instruction). Placeholder: 2ο account μη-signer.
+                non_signers = [a["pubkey"] for a in account_keys if not a.get("signer")]
+                mint = non_signers[0] if non_signers else None
+
+                return mint, creator
+            except Exception:
+                log.debug(f"Απέτυχε attempt {attempt+1} για tx {signature}", exc_info=True)
+                time.sleep(0.3 * (attempt + 1))
+
+        return None, None
 
 
 async def main():
